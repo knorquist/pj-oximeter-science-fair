@@ -1,11 +1,12 @@
 # pulse_oximeter.py - Main pulse oximeter implementation
 
-import cv2
 import numpy as np
 import time
 from collections import deque
 import threading
 import json
+import cv2
+from picamera2 import Picamera2
 
 class PulseOximeter:
     def __init__(self, buffer_size=100, fps=30):
@@ -23,19 +24,27 @@ class PulseOximeter:
         self.camera = None
         
     def start_camera(self):
-        """Initialize the Raspberry Pi camera"""
-        self.camera = cv2.VideoCapture(0)
-        # Set resolution to 640x480
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        # Set framerate
-        self.camera.set(cv2.CAP_PROP_FPS, self.fps)
-        return self.camera.isOpened()
+        """Initialize the Raspberry Pi camera using picamera2"""
+        try:
+            self.camera = Picamera2()
+            # Configure camera with 640x480 resolution
+            config = self.camera.create_still_configuration(
+                main={"size": (640, 480)},
+                controls={"FrameDurationLimits": (int(1000000/self.fps), 100000000)}
+            )
+            self.camera.configure(config)
+            self.camera.start()
+            time.sleep(1)  # Give camera time to initialize
+            return True
+        except Exception as e:
+            print(f"Camera initialization error: {e}")
+            return False
     
     def stop_camera(self):
         """Release the camera resource"""
         if self.camera is not None:
-            self.camera.release()
+            self.camera.stop()
+            self.camera.close()
             self.camera = None
     
     def start_monitoring(self):
@@ -64,24 +73,25 @@ class PulseOximeter:
             return
         
         while self.running:
-            # Capture frame
-            ret, self.frame = self.camera.read()
-            if not ret:
-                print("Failed to capture frame")
-                break
-            
-            # Extract ROI (assumed to be center of frame)
-            height, width = self.frame.shape[:2]
-            roi_size = min(width, height) // 3
-            roi_x = (width - roi_size) // 2
-            roi_y = (height - roi_size) // 2
-            self.roi = self.frame[roi_y:roi_y+roi_size, roi_x:roi_x+roi_size]
-            
-            # Process frame
-            self._process_frame()
-            
-            # Sleep to maintain frame rate
-            time.sleep(1.0/self.fps)
+            try:
+                # Capture frame using picamera2
+                self.frame = self.camera.capture_array()
+                
+                # Extract ROI (assumed to be center of frame)
+                height, width = self.frame.shape[:2]
+                roi_size = min(width, height) // 3
+                roi_x = (width - roi_size) // 2
+                roi_y = (height - roi_size) // 2
+                self.roi = self.frame[roi_y:roi_y+roi_size, roi_x:roi_x+roi_size]
+                
+                # Process frame
+                self._process_frame()
+                
+                # Sleep to maintain frame rate
+                time.sleep(1.0/self.fps)
+            except Exception as e:
+                print(f"Error in monitoring thread: {e}")
+                time.sleep(0.5)  # Short delay before retry
     
     def _process_frame(self):
         """Process a video frame to extract pulse and SpO2 data"""
