@@ -1,0 +1,292 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raspberry Pi Pulse Oximeter</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button.start {
+            background-color: #4CAF50;
+            color: white;
+        }
+        button.stop {
+            background-color: #f44336;
+            color: white;
+        }
+        .readings {
+            display: flex;
+            justify-content: space-around;
+            margin-bottom: 20px;
+        }
+        .reading-box {
+            text-align: center;
+            padding: 15px;
+            border-radius: 8px;
+            width: 45%;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+        .pulse-box {
+            background-color: #ffebee;
+        }
+        .spo2-box {
+            background-color: #e3f2fd;
+        }
+        .value {
+            font-size: 48px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .unit {
+            font-size: 16px;
+            color: #666;
+        }
+        .camera-view {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .camera-view img {
+            max-width: 100%;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+        }
+        .chart-container {
+            position: relative;
+            height: 200px;
+            margin-bottom: 20px;
+        }
+        .status {
+            text-align: center;
+            margin-top: 20px;
+            color: #666;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Raspberry Pi Pulse Oximeter</h1>
+        </div>
+        
+        <div class="controls">
+            <button class="start" id="startBtn">Start Monitoring</button>
+            <button class="stop" id="stopBtn" disabled>Stop Monitoring</button>
+        </div>
+        
+        <div class="readings">
+            <div class="reading-box pulse-box">
+                <h2>Pulse Rate</h2>
+                <div class="value" id="pulseValue">--</div>
+                <div class="unit">BPM</div>
+            </div>
+            <div class="reading-box spo2-box">
+                <h2>SpO<sub>2</sub></h2>
+                <div class="value" id="spo2Value">--</div>
+                <div class="unit">%</div>
+            </div>
+        </div>
+        
+        <div class="camera-view">
+            <h2>Camera View (ROI)</h2>
+            <img id="roiImage" src="" alt="Place finger on camera">
+        </div>
+        
+        <div class="chart-container">
+            <canvas id="signalChart"></canvas>
+        </div>
+        
+        <div class="status" id="statusMessage">
+            Ready to monitor. Place your fingertip over the camera lens and press Start.
+        </div>
+    </div>
+
+    <script>
+        // DOM elements
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const pulseValue = document.getElementById('pulseValue');
+        const spo2Value = document.getElementById('spo2Value');
+        const roiImage = document.getElementById('roiImage');
+        const statusMessage = document.getElementById('statusMessage');
+        
+        // Chart setup
+        const ctx = document.getElementById('signalChart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Red Signal',
+                        data: [],
+                        borderColor: 'rgba(255, 99, 132, 1)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                        borderWidth: 2,
+                        tension: 0.2
+                    },
+                    {
+                        label: 'IR Signal',
+                        data: [],
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                        borderWidth: 2,
+                        tension: 0.2
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Time (s)'
+                        }
+                    },
+                    y: {
+                        title: {
+                            display: true,
+                            text: 'Signal Value'
+                        }
+                    }
+                },
+                animation: {
+                    duration: 0
+                }
+            }
+        });
+        
+        // Variables
+        let monitoring = false;
+        let updateInterval;
+        const updateFrequency = 100; // ms
+        
+        // Event listeners
+        startBtn.addEventListener('click', startMonitoring);
+        stopBtn.addEventListener('click', stopMonitoring);
+        
+        // Functions
+        function startMonitoring() {
+            fetch('/api/start', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        monitoring = true;
+                        startBtn.disabled = true;
+                        stopBtn.disabled = false;
+                        statusMessage.textContent = 'Monitoring... Keep your finger steady on the camera.';
+                        
+                        // Start regular updates
+                        updateData();
+                        updateInterval = setInterval(updateData, updateFrequency);
+                    } else {
+                        statusMessage.textContent = 'Failed to start monitoring. Please try again.';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error starting monitoring:', error);
+                    statusMessage.textContent = 'Error connecting to the server.';
+                });
+        }
+        
+        function stopMonitoring() {
+            fetch('/api/stop', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        monitoring = false;
+                        startBtn.disabled = false;
+                        stopBtn.disabled = true;
+                        statusMessage.textContent = 'Monitoring stopped.';
+                        
+                        // Stop regular updates
+                        clearInterval(updateInterval);
+                    } else {
+                        statusMessage.textContent = 'Failed to stop monitoring. Please try again.';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error stopping monitoring:', error);
+                    statusMessage.textContent = 'Error connecting to the server.';
+                });
+        }
+        
+        function updateData() {
+            if (!monitoring) return;
+            
+            fetch('/api/data')
+                .then(response => response.json())
+                .then(data => {
+                    // Update pulse and SpO2 readings
+                    pulseValue.textContent = data.pulse_rate || '--';
+                    spo2Value.textContent = data.spo2 || '--';
+                    
+                    // Update ROI image if available
+                    if (data.roi_image) {
+                        roiImage.src = `data:image/jpeg;base64,${data.roi_image}`;
+                    }
+                    
+                    // Update chart with historical data
+                    if (data.historical_data) {
+                        updateChart(data.historical_data);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching data:', error);
+                    statusMessage.textContent = 'Error fetching data from the server.';
+                });
+        }
+        
+        function updateChart(historicalData) {
+            // Update chart data
+            chart.data.labels = historicalData.times;
+            chart.data.datasets[0].data = historicalData.red;
+            chart.data.datasets[1].data = historicalData.ir;
+            
+            // Limit visible data points for better performance
+            const maxDataPoints = 100;
+            if (chart.data.labels.length > maxDataPoints) {
+                chart.data.labels = chart.data.labels.slice(-maxDataPoints);
+                chart.data.datasets[0].data = chart.data.datasets[0].data.slice(-maxDataPoints);
+                chart.data.datasets[1].data = chart.data.datasets[1].data.slice(-maxDataPoints);
+            }
+            
+            chart.update();
+        }
+    </script>
+</body>
+</html>
